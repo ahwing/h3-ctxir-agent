@@ -1,0 +1,7 @@
+node_modules/
+runs/
+*.log
+.venv/
+AGENTS.md
+CLAUDE.md
+docs/

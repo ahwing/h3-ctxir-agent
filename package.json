@@ -1,0 +1,20 @@
+{
+  "name": "h3-ctxir-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-built replacement for the closed MiniMax H3-Context-IR stage, plus an A/B harness against H3-Base on the G7e",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "ir": "node src/cli_ir.mjs",
+    "run": "node src/run.mjs",
+    "report": "node src/report.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "3.1149.0",
+    "@aws-sdk/client-s3": "3.1149.0",
+    "@aws-sdk/credential-provider-node": "3.972.88",
+    "@aws-sdk/s3-request-presigner": "3.1149.0",
+    "@smithy/signature-v4": "5.7.4"
+  }
+}
