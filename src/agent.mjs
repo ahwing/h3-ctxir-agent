@@ -64,6 +64,14 @@ export function mediaContent(c, probes, labels) {
   return blocks;
 }
 
+/** ASR text of every audio label (audio files and video soundtracks), for the voice-reference leak check. */
+export function refSpeechOf(labels, probes) {
+  return labels
+    .filter((l) => l.type === 'audio')
+    .map((l) => ({label: l.label, text: (probes[l.conditionIndex]?.asr?.segments || []).map((x) => x.text).join(' ').trim()}))
+    .filter((r) => r.text);
+}
+
 const PLAN_ASK = `First, plan. Reply with ONE JSON object:
 {"intent": "<one sentence>", "user_label_mapping": [{"user_said": "...", "label": "<real label>"}],
  "asset_roles": [{"label": "<Picture 1>", "role": "...", "relationship": "fully_preserved|partially_preserved|attribute_transfer|weak_reference|fully_copy|partially_copy|reference|unused", "why": "..."}],
@@ -94,7 +102,7 @@ export async function buildIR(c, {workDir, maxRepairs = 2, useCritic = true, log
   log(`labels: ${labels.map((l) => l.label).join(' ') || '-'}`);
   const system = systemPrompt(c.mode);
   const media = mediaContent(c, probes, labels);
-  const ctx = {mode: c.mode, duration: c.duration, labels, expectDialogue: c.expect_dialogue};
+  const ctx = {mode: c.mode, duration: c.duration, labels, expectDialogue: c.expect_dialogue, refSpeech: refSpeechOf(labels, probes), userText: c.text};
 
   const planR = await converse({model: MODELS.writer, system, content: [...media, ...cachePoint(), txt(PLAN_ASK)], maxTokens: 6000, purpose: 'plan', ledger});
   let plan;
@@ -126,5 +134,7 @@ export async function buildIR(c, {workDir, maxRepairs = 2, useCritic = true, log
   // keep the round with the fewest validator errors, then fewest critic highs (latest wins ties)
   const score = (x) => errorsOf(x.issues).length * 10 + (x.critic?.issues || []).filter((i) => i.severity === 'high').length;
   const best = rounds.reduce((a, b) => (score(b) <= score(a) ? b : a));
-  return {ir: best.ir, labels, plan, rounds, ledger, probes: probes.map(({frames, image, ...p}) => p)};
+  const finalErrors = errorsOf(best.issues);
+  // ok=false: the repair budget ran out with errors left. The IR is still returned; the caller decides whether to send it.
+  return {ir: best.ir, ok: !finalErrors.length, remainingErrors: finalErrors.map((i) => i.code), labels, plan, rounds, ledger, refSpeech: ctx.refSpeech, probes: probes.map(({frames, image, ...p}) => p)};
 }

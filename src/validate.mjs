@@ -69,6 +69,64 @@ export function checkDialogue(ir, expect, issues) {
   if ((ir.match(/<d>/g) || []).length !== (ir.match(/<\/d>/g) || []).length) issues.push({level: 'error', code: 'd_unbalanced', msg: '<d> and </d> counts differ'});
 }
 
+// Speech normalisation shared with the leak check: lower-case, NFKC, no punctuation/space, Traditional->Simplified
+// for the handful of characters Whisper flips most often (熱/热 etc.) so a script switch does not hide a leak.
+const T2S = {熱: '热', 氣: '气', 這: '这', 們: '们', 個: '个', 說: '说', 來: '来', 時: '时', 對: '对', 會: '会', 後: '后', 裡: '里', 嗎: '吗', 麼: '么', 經: '经', 間: '间', 點: '点', 買: '买', 園: '园', 開: '开', 見: '见', 讓: '让', 話: '话', 還: '还', 過: '过', 為: '为', 樣: '样', 錯: '错', 誰: '谁', 長: '长', 發: '发', 現: '现', 種: '种', 電: '电', 東: '东', 車: '车', 門: '门', 問: '问', 聽: '听', 歡: '欢', 媽: '妈', 愛: '爱', 遠: '远', 邊: '边', 頭: '头', 學: '学', 實: '实', 帶: '带', 體: '体'};
+export const normSay = (s) => [...String(s || '').toLowerCase().normalize('NFKC').replace(/[\p{P}\p{S}\s]+/gu, '')].map((ch) => T2S[ch] || ch).join('');
+
+/** Overlapping windows of a normalised utterance: 4 characters for CJK text, 3 words otherwise. */
+export function speechWindows(text) {
+  if (CJK.test(text)) {
+    const n = normSay(text);
+    return n.length < 4 ? [] : Array.from({length: n.length - 3}, (_, i) => n.slice(i, i + 4));
+  }
+  const w = String(text || '').toLowerCase().normalize('NFKC').split(/[^\p{L}\p{N}']+/u).filter(Boolean);
+  return w.length < 3 ? [] : Array.from({length: w.length - 2}, (_, i) => w.slice(i, i + 3).join(' '));
+}
+
+/**
+ * Share of a reference utterance's windows that also appear in `spoken`, ignoring windows the user typed themselves.
+ * Used for both the IR (<d> text) and the generated clip (output ASR).
+ */
+export function leakShare(refText, spoken, userText = '') {
+  const user = new Set(speechWindows(userText));
+  const wins = speechWindows(refText).filter((w) => !user.has(w));
+  if (wins.length < 2) return 0;
+  const hay = CJK.test(refText) ? normSay(spoken) : ` ${String(spoken || '').toLowerCase().normalize('NFKC').split(/[^\p{L}\p{N}']+/u).filter(Boolean).join(' ')} `;
+  const hit = wins.filter((w) => (CJK.test(refText) ? hay.includes(w) : hay.includes(` ${w} `))).length;
+  return +(hit / wins.length).toFixed(2);
+}
+
+/** Relationship marker the IR gives each label in retention_analysis, e.g. {'<Audio 1>': 'reference'}. */
+export function retentionMarkers(ir) {
+  const {map} = splitSections(ir, REF_SECTIONS);
+  const out = {};
+  for (const line of (map.retention_analysis || '').split('\n')) {
+    const m = /^\s*(<(?:Picture|Video|Audio|Subject) \d+>)[^:]*:\s*([a-z_]+)\s*-/.exec(line);
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+export const LEAK_SHARE = 0.5;
+
+/**
+ * Voice-reference leak: a reference audio whose role is only timbre (retention marker reference / weak_reference)
+ * must not have its own words in any <d>. Copied audio (fully_copy / partially_copy) may legitimately repeat them,
+ * so those only warn. ctx.refSpeech = [{label:'<Audio 1>', text:'ASR of that asset'}].
+ */
+export function checkVoiceLeak(ir, ctx, issues) {
+  const spoken = [...ir.matchAll(/<d>([\s\S]*?)<\/d>/g)].map((m) => m[1].replace(/^\[[^\]]*\]/, '')).join(' ');
+  if (!spoken.trim()) return;
+  const markers = ctx.mode === 'ref2va' ? retentionMarkers(ir) : {};
+  for (const r of ctx.refSpeech || []) {
+    const share = leakShare(r.text, spoken, ctx.userText);
+    if (share < LEAK_SHARE) continue;
+    const copy = /^(fully_copy|partially_copy)$/.test(markers[r.label] || '');
+    issues.push({level: copy ? 'warn' : 'error', code: 'voice_ref_leak', msg: `${Math.round(share * 100)}% of the words spoken in ${r.label} ("${r.text.slice(0, 40)}") reappear inside <d>; ${r.label} is a ${markers[r.label] || 'voice'} reference, so H3 would read its words aloud. Keep only the user's lines in <d>.`});
+  }
+}
+
 function checkEnglish(name, body, issues) {
   const rest = stripAllowed(body);
   if (CJK.test(rest)) issues.push({level: 'error', code: 'not_english', msg: `${name} contains non-English text outside <d> or quoted on-screen text: "${rest.match(/.{0,20}[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]+.{0,20}/)?.[0]}"`});
@@ -76,7 +134,8 @@ function checkEnglish(name, body, issues) {
 
 /**
  * @param {string} ir
- * @param {{mode:'ref2va'|'t2va'|'i2va', duration:number, labels:{label:string,source:string}[], expectDialogue?:string[]}} ctx
+ * @param {{mode:'ref2va'|'t2va'|'i2va', duration:number, labels:{label:string,source:string}[], expectDialogue?:string[],
+ *   refSpeech?:{label:string,text:string}[], userText?:string}} ctx  refSpeech/userText enable the voice-reference leak check
  * @returns {{level:'error'|'warn', code:string, msg:string}[]}
  */
 export function validateIR(ir, ctx) {
@@ -134,6 +193,7 @@ export function validateIR(ir, ctx) {
     BASE_SECTIONS.forEach((s) => map[s] && checkEnglish(s, map[s], issues));
   }
   checkDialogue(ir, ctx.expectDialogue, issues);
+  checkVoiceLeak(ir, ctx, issues);
   return issues;
 }
 

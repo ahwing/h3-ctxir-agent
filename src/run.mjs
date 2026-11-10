@@ -8,9 +8,8 @@ import {buildIR} from './agent.mjs';
 import {computeLabels} from './labels.mjs';
 import {validateIR, errorsOf} from './validate.mjs';
 import {stage, buildRequest, generate, health, h3Urls} from './h3.mjs';
-import {probeCondition, qcClip, contactSheet, asr, loudness} from './probe.mjs';
-import {judgeVideos, judgeIRs, dialogueScore} from './judge.mjs';
-import {img, txt} from './bedrock.mjs';
+import {qcClip, contactSheet, asr, loudness} from './probe.mjs';
+import {judgeVideos, judgeIRs, dialogueScore, refBlocksFor} from './judge.mjs';
 import {writeReport} from './report.mjs';
 import {officialIR, dataUri} from './minimax.mjs';
 
@@ -64,7 +63,7 @@ async function phaseIR() {
     const out = await buildIR(c, {workDir: path.join(RUN, 'work', c.id), log: (m) => log(`  ${c.id}: ${m}`)});
     ledger.push(...out.ledger.map((x) => ({...x, case: c.id})));
     saveLedger();
-    const official = c.official_ir ? validateIR(c.official_ir, {mode: c.mode, duration: c.duration, labels: out.labels, expectDialogue: c.expect_dialogue}) : null;
+    const official = c.official_ir ? validateIR(c.official_ir, {mode: c.mode, duration: c.duration, labels: out.labels, expectDialogue: c.expect_dialogue, refSpeech: out.refSpeech, userText: c.text}) : null;
     wj(f, {case: c.id, ir: out.ir, labels: out.labels, plan: out.plan, rounds: out.rounds, probes: out.probes, officialValidator: official, usd: +ledger.slice(before).reduce((s, x) => s + x.usd, 0).toFixed(3)});
     log(`  ${c.id}: final IR ${out.ir.length} chars, ${errorsOf(out.rounds.at(-1).issues).length} errors in last round`);
   }
@@ -138,16 +137,7 @@ async function phaseGen({dry}) {
   wj(path.join(RUN, 'gen_failures.json'), failures);
 }
 
-async function refBlocks(c) {
-  const blocks = [];
-  for (const [i, cond] of c.conditions.entries()) {
-    const p = await probeCondition(cond, path.resolve(ROOT, 'cases', cond.file), path.join(RUN, 'judge_refs', c.id));
-    if (p.type === 'image') blocks.push(txt(`Reference ${i + 1}: image`), img(p.image));
-    else if (p.type === 'video') blocks.push(txt(`Reference ${i + 1}: video ${p.duration}s, soundtrack ASR: "${p.asr?.segments?.map((s) => s.text).join(' ') || 'none'}". Four frames:`), ...p.frames.filter((_, k) => k % Math.ceil(p.frames.length / 4) === 0).map((f) => img(f.file)));
-    else blocks.push(txt(`Reference ${i + 1}: audio ${p.duration}s, ASR: "${p.asr?.segments?.map((s) => s.text).join(' ') || 'no speech'}"`));
-  }
-  return blocks;
-}
+const refBlocks = (c) => refBlocksFor(c, path.join(ROOT, 'cases'), path.join(RUN, 'judge_refs', c.id));
 
 async function phaseScore() {
   const clipDir = path.join(RUN, 'clips');
