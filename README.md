@@ -108,6 +108,22 @@ node src/run.mjs --run r5 --cases gold_ref2va,zh_voice_timbre --seeds 5 \
 - `--prev rN`：把上一版 agent 当 `agent_v1` 组同种子对比。
 - 跑前确认 GPU 机空闲，否则会排队或 OOM。
 
+### 5. 换厂商评委复核、best-of-N 估算
+
+```bash
+# Re-score an existing run's clips with a Claude judge and compare with the run's own GPT judge
+node src/rejudge.mjs --run rgpt --model us.anthropic.claude-opus-5-5 --tag anthropic \
+  --writers agent_v1=anthropic,ir_g61sol=openai,ir_g61terra=openai
+# Offline estimate: re-roll seeds until the cheap verifier passes, read the judge score of the shipped clip
+node src/bestofn_eval.mjs --run rgpt --tag anthropic
+```
+
+- `judges_<tag>.md`：两个评委的首名一致率、逐条 Spearman，以及"跨厂商分"（只用和写手不同厂商的评委）。评委松紧不同，先用中立组（原话 / 官方 API）量出偏移，再算"跨厂商校准分"。
+- `bestofn.md`：每组在 N=1..5 时出片的平均分、能用率和平均抽卡次数，以及验证器和评委（≥7 分）的混淆计数。
+- 线上用法：`src/bestofn.mjs` 的 `generateBestOfN()` 每出一条片就做 QC、ASR 台词准确率和音色参考泄漏检查，不通过才换种子。
+- `buildIR` 返回值新增 `ok` / `remainingErrors`，修满 2 轮仍有错误时由调用方决定是否发给 GPU。
+- 校验器新增 `voice_ref_leak`：音色参考音频（retention 标为 reference / weak_reference）里的原话出现在 `<d>` 里就报错；标为 fully_copy / partially_copy 时只警告。
+
 ### 常用开关
 
 | 环境变量 | 作用 | 默认 |
