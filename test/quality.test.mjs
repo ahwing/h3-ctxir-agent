@@ -98,6 +98,17 @@ test('judge comparison: agreement, rank correlation and cross-vendor score', () 
   assert.equal(r.perArm.opus.meanBoth, 8);
 });
 
+test('judge comparison: a harsher judge is calibrated on neutral arms before cross-vendor scoring', () => {
+  // judge B scores everything 1 point lower; the raw arm (no writer) reveals that
+  const A = {c: {1: {byKey: {raw: {overall: 5}, opus: {overall: 8}, gpt: {overall: 8}}, ranking: ['opus']}}};
+  const B = {c: {1: {byKey: {raw: {overall: 4}, opus: {overall: 7}, gpt: {overall: 7}}, ranking: ['opus']}}};
+  const r = compareJudges(A, B, {modelA: 'us.openai.gpt-6-sol', modelB: 'us.anthropic.claude-opus-5-5', writerVendor: {opus: 'anthropic', gpt: 'openai'}});
+  assert.equal(r.harshnessOffsetBminusA, -1);
+  assert.equal(r.perArm.gpt.crossVendor, 7, 'uncalibrated: looks worse than opus');
+  assert.equal(r.perArm.gpt.crossCalibrated, 8, 'calibrated: same as opus');
+  assert.equal(r.perArm.opus.crossCalibrated, 8);
+});
+
 test('validator still passes clean IRs with no reference speech (no regressions)', () => {
   assert.deepEqual(errorsOf(validateIR(ref2va('reference', '大家快趁热吃吧。'), ctx)).map((i) => i.code), []);
 });

@@ -79,13 +79,27 @@ export function compareJudges(A, B, {modelA, modelB, writerVendor = {}, usable =
   const perArm = Object.fromEntries(
     Object.entries(arms).map(([arm, x]) => [arm, {n: x.a.length, writer: writerVendor[arm] || 'none', meanA: mean(x.a), meanB: mean(x.b), meanBoth: mean(x.a.map((v, i) => (v + x.b[i]) / 2)), crossVendor: mean(x.cross), usableA: use(x.a), usableB: use(x.b), firstA: `${x.winsA}/${x.n}`, firstB: `${x.winsB}/${x.n}`}]),
   );
+  // Judges differ in harshness. Measure B - A on arms neither judge has a stake in (raw / api / doc examples),
+  // shift B onto A's scale, then recompute the cross-vendor score so harshness is not mistaken for vendor bias.
+  const neutral = Object.entries(arms).filter(([arm]) => !['anthropic', 'openai', 'amazon'].includes(writerVendor[arm] || 'none'));
+  const diffs = neutral.flatMap(([, x]) => x.b.map((v, i) => v - x.a[i]));
+  const offset = diffs.length ? +(diffs.reduce((s, v) => s + v, 0) / diffs.length).toFixed(2) : 0;
+  for (const [arm, x] of Object.entries(arms)) {
+    const wv = writerVendor[arm] || 'none';
+    const cal = x.a.map((va, i) => {
+      const keep = [...(wv !== vA ? [va] : []), ...(wv !== vB ? [x.b[i] - offset] : [])];
+      return keep.length ? keep.reduce((s, v) => s + v, 0) / keep.length : (va + x.b[i] - offset) / 2;
+    });
+    perArm[arm].crossCalibrated = mean(cal);
+    perArm[arm].usableCalibrated = use(cal);
+  }
   const order = (k) => Object.entries(perArm).sort((p, q) => q[1][k] - p[1][k]).map(([a]) => a);
-  return {modelA, modelB, seeds: seedsBoth, top1Agreement: seedsBoth ? +(top1Same / seedsBoth).toFixed(2) : null, spearmanClips: spearman(pairsA, pairsB), clips: pairsA.length, perArm, rankA: order('meanA'), rankB: order('meanB'), rankCross: order('crossVendor')};
+  return {modelA, modelB, seeds: seedsBoth, top1Agreement: seedsBoth ? +(top1Same / seedsBoth).toFixed(2) : null, spearmanClips: spearman(pairsA, pairsB), clips: pairsA.length, harshnessOffsetBminusA: offset, neutralArms: neutral.map(([a]) => a), perArm, rankA: order('meanA'), rankB: order('meanB'), rankCross: order('crossVendor'), rankCrossCalibrated: order('crossCalibrated')};
 }
 
 export function compareToMarkdown(run, cmp) {
-  const L = [`# Judge cross-check - run ${run}`, '', `Judge A: ${cmp.modelA} · Judge B: ${cmp.modelB} · ${cmp.clips} clips over ${cmp.seeds} case-seeds.`, '', `- Top-1 agreement (same winner per case-seed): ${cmp.top1Agreement}`, `- Spearman of per-clip overall scores: ${cmp.spearmanClips}`, `- Arm order by A: ${cmp.rankA.join(' > ')}`, `- Arm order by B: ${cmp.rankB.join(' > ')}`, `- Arm order, cross-vendor only: ${cmp.rankCross.join(' > ')}`, '', '| arm | writer vendor | n | overall A | overall B | mean A+B | cross-vendor | usable A | usable B | 1st A | 1st B |', '|---|---|---|---|---|---|---|---|---|---|---|'];
-  for (const [arm, v] of Object.entries(cmp.perArm)) L.push(`| ${arm} | ${v.writer} | ${v.n} | ${v.meanA} | ${v.meanB} | ${v.meanBoth} | ${v.crossVendor} | ${v.usableA} | ${v.usableB} | ${v.firstA} | ${v.firstB} |`);
-  L.push('', 'cross-vendor = mean of the judges whose vendor differs from the writer of that arm (both judges for raw / api).');
+  const L = [`# Judge cross-check - run ${run}`, '', `Judge A: ${cmp.modelA} · Judge B: ${cmp.modelB} · ${cmp.clips} clips over ${cmp.seeds} case-seeds.`, '', `- Top-1 agreement (same winner per case-seed): ${cmp.top1Agreement}`, `- Spearman of per-clip overall scores: ${cmp.spearmanClips}`, `- Arm order by A: ${cmp.rankA.join(' > ')}`, `- Arm order by B: ${cmp.rankB.join(' > ')}`, `- Arm order, cross-vendor only: ${cmp.rankCross.join(' > ')}`, `- Harshness offset B - A on neutral arms (${cmp.neutralArms.join(', ') || 'none'}): ${cmp.harshnessOffsetBminusA}`, `- Arm order, cross-vendor calibrated: ${cmp.rankCrossCalibrated.join(' > ')}`, '', '| arm | writer vendor | n | overall A | overall B | mean A+B | cross-vendor | cross calibrated | usable calibrated | usable A | usable B | 1st A | 1st B |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|'];
+  for (const [arm, v] of Object.entries(cmp.perArm)) L.push(`| ${arm} | ${v.writer} | ${v.n} | ${v.meanA} | ${v.meanB} | ${v.meanBoth} | ${v.crossVendor} | ${v.crossCalibrated} | ${v.usableCalibrated} | ${v.usableA} | ${v.usableB} | ${v.firstA} | ${v.firstB} |`);
+  L.push('', 'cross-vendor = mean of the judges whose vendor differs from the writer of that arm (both judges for raw / api).', 'cross calibrated = the same after shifting judge B by the harshness offset measured on the neutral arms.');
   return L.join('\n');
 }
