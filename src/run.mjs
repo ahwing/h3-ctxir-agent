@@ -8,9 +8,8 @@ import {buildIR} from './agent.mjs';
 import {computeLabels} from './labels.mjs';
 import {validateIR, errorsOf} from './validate.mjs';
 import {stage, buildRequest, generate, health, h3Urls} from './h3.mjs';
-import {probeCondition, qcClip, contactSheet, asr, loudness} from './probe.mjs';
-import {judgeVideos, judgeIRs, dialogueScore} from './judge.mjs';
-import {img, txt} from './bedrock.mjs';
+import {qcClip, contactSheet, asr, loudness} from './probe.mjs';
+import {judgeVideos, judgeIRs, dialogueScore, refBlocksFor} from './judge.mjs';
 import {writeReport} from './report.mjs';
 import {officialIR, dataUri} from './minimax.mjs';
 
@@ -20,7 +19,8 @@ const RUN = path.join(ROOT, 'runs', args.run || 'dev');
 const PHASE = args.phase || 'all';
 const SEEDS = [1001, 2002, 3003, 4004, 5005, 6006].slice(0, +(args.seeds || 2));
 const ARMS = String(args.arms || 'raw,agent,official,api').split(',');
-const ALL = JSON.parse(fs.readFileSync(path.join(ROOT, 'cases/cases.json'), 'utf8'));
+// --cases-file: another case list (e.g. real Studio clips); condition files may be absolute.
+const ALL = JSON.parse(fs.readFileSync(args['cases-file'] ? path.resolve(args['cases-file']) : path.join(ROOT, 'cases/cases.json'), 'utf8'));
 const CASES = args.cases ? ALL.filter((c) => String(args.cases).split(',').includes(c.id)) : ALL;
 const log = (...m) => console.log(new Date().toISOString().slice(11, 19), ...m);
 const rj = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -31,7 +31,7 @@ const saveLedger = () => wj(ledgerFile, ledger);
 
 /** Prompt text per arm for a case (null = arm not available for this case). */
 function armPrompt(c, arm) {
-  if (arm === 'raw') return c.text;
+  if (arm === 'raw') return c.raw_prompt || c.text; // raw_prompt = what the caller sends today (Studio wrapper)
   if (arm === 'official') return c.official_ir || null;
   if (arm === 'agent') return rj(path.join(RUN, 'ir', `${c.id}.json`)).ir;
   // agent_v1 = the agent IR from an earlier run (--prev r2), for before/after comparisons of agent changes
@@ -63,7 +63,7 @@ async function phaseIR() {
     const out = await buildIR(c, {workDir: path.join(RUN, 'work', c.id), log: (m) => log(`  ${c.id}: ${m}`)});
     ledger.push(...out.ledger.map((x) => ({...x, case: c.id})));
     saveLedger();
-    const official = c.official_ir ? validateIR(c.official_ir, {mode: c.mode, duration: c.duration, labels: out.labels, expectDialogue: c.expect_dialogue}) : null;
+    const official = c.official_ir ? validateIR(c.official_ir, {mode: c.mode, duration: c.duration, labels: out.labels, expectDialogue: c.expect_dialogue, refSpeech: out.refSpeech, userText: c.text}) : null;
     wj(f, {case: c.id, ir: out.ir, labels: out.labels, plan: out.plan, rounds: out.rounds, probes: out.probes, officialValidator: official, usd: +ledger.slice(before).reduce((s, x) => s + x.usd, 0).toFixed(3)});
     log(`  ${c.id}: final IR ${out.ir.length} chars, ${errorsOf(out.rounds.at(-1).issues).length} errors in last round`);
   }
@@ -83,7 +83,7 @@ async function phaseIRApi({dry}) {
     }
     log(`[ir-api] ${c.id} (${c.mode})`);
     try {
-      const urls = (c.conditions || []).map((x) => dataUri(path.join(ROOT, 'cases', x.file)));
+      const urls = (c.conditions || []).map((x) => dataUri(path.resolve(ROOT, 'cases', x.file)));
       const t = await officialIR(c, urls, {log: (m) => log(`  ${c.id}: ${m}`)});
       ledger.push({purpose: 'minimax-context-ir', case: c.id, usd: t.usd, usage: t.usage});
       saveLedger();
@@ -101,7 +101,7 @@ async function phaseIRApi({dry}) {
 async function phaseGen({dry}) {
   const jobs = [];
   for (const c of CASES.filter((x) => x.video_ab)) {
-    const uris = dry ? c.conditions.map((x) => `s3://dry/${x.file}`) : await Promise.all(c.conditions.map((x) => stage(path.join(ROOT, 'cases', x.file))));
+    const uris = dry ? c.conditions.map((x) => `s3://dry/${x.file}`) : await Promise.all(c.conditions.map((x) => stage(path.resolve(ROOT, 'cases', x.file))));
     for (const arm of ARMS) {
       const prompt = armPrompt(c, arm);
       if (!prompt) continue;
@@ -137,16 +137,7 @@ async function phaseGen({dry}) {
   wj(path.join(RUN, 'gen_failures.json'), failures);
 }
 
-async function refBlocks(c) {
-  const blocks = [];
-  for (const [i, cond] of c.conditions.entries()) {
-    const p = await probeCondition(cond, path.join(ROOT, 'cases', cond.file), path.join(RUN, 'judge_refs', c.id));
-    if (p.type === 'image') blocks.push(txt(`Reference ${i + 1}: image`), img(p.image));
-    else if (p.type === 'video') blocks.push(txt(`Reference ${i + 1}: video ${p.duration}s, soundtrack ASR: "${p.asr?.segments?.map((s) => s.text).join(' ') || 'none'}". Four frames:`), ...p.frames.filter((_, k) => k % Math.ceil(p.frames.length / 4) === 0).map((f) => img(f.file)));
-    else blocks.push(txt(`Reference ${i + 1}: audio ${p.duration}s, ASR: "${p.asr?.segments?.map((s) => s.text).join(' ') || 'no speech'}"`));
-  }
-  return blocks;
-}
+const refBlocks = (c) => refBlocksFor(c, path.join(ROOT, 'cases'), path.join(RUN, 'judge_refs', c.id));
 
 async function phaseScore() {
   const clipDir = path.join(RUN, 'clips');

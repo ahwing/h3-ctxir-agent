@@ -1,5 +1,19 @@
 // Scoring: deterministic dialogue checks on the output audio + a blind LLM judge from a different vendor (GPT-6).
+import path from 'node:path';
 import {converse, img, txt, parseJson, MODELS} from './bedrock.mjs';
+import {probeCondition} from './probe.mjs';
+
+/** Reference-asset blocks shown to the video and IR judges (images, 4 video frames, ASR of audio). */
+export async function refBlocksFor(c, casesDir, workDir) {
+  const blocks = [];
+  for (const [i, cond] of c.conditions.entries()) {
+    const p = await probeCondition(cond, path.resolve(casesDir, cond.file), workDir);
+    if (p.type === 'image') blocks.push(txt(`Reference ${i + 1}: image`), img(p.image));
+    else if (p.type === 'video') blocks.push(txt(`Reference ${i + 1}: video ${p.duration}s, soundtrack ASR: "${p.asr?.segments?.map((s) => s.text).join(' ') || 'none'}". Four frames:`), ...p.frames.filter((_, k) => k % Math.ceil(p.frames.length / 4) === 0).map((f) => img(f.file)));
+    else blocks.push(txt(`Reference ${i + 1}: audio ${p.duration}s, ASR: "${p.asr?.segments?.map((s) => s.text).join(' ') || 'no speech'}"`));
+  }
+  return blocks;
+}
 
 export const normSpeech = (s) => String(s || '').toLowerCase().normalize('NFKC').replace(/[\p{P}\p{S}\s]+/gu, '');
 
@@ -49,7 +63,7 @@ Judge only what you can see/read. Use the full scale. Reply with ONE JSON object
  * @param {{text:string, refBlocks:any[], clips:{key:string, sheet:string, asrText:string, meanDb:number|null}[], seed:string, ledger?:any[]}} o
  * @returns {{byKey: Record<string, any>, ranking: string[], letters: Record<string,string>, raw: string}}
  */
-export async function judgeVideos({text, refBlocks, clips, seed, ledger}) {
+export async function judgeVideos({text, refBlocks, clips, seed, ledger, model = MODELS.judge}) {
   const order = shuffled(clips, seed);
   const letters = {};
   const content = [txt(`USER INSTRUCTION:\n${text}\n\nREFERENCE ASSETS:`), ...refBlocks, txt('CANDIDATES:')];
@@ -58,7 +72,7 @@ export async function judgeVideos({text, refBlocks, clips, seed, ledger}) {
     letters[L] = c.key;
     content.push(txt(`Candidate ${L} - audio: mean ${c.meanDb ?? '?'} dB; ASR transcript: "${c.asrText || '(no speech)'}"`), img(c.sheet));
   });
-  const r = await converse({model: MODELS.judge, system: VIDEO_SYS, content, maxTokens: 6000, purpose: 'judge-video', ledger});
+  const r = await converse({model, system: VIDEO_SYS, content, maxTokens: 6000, purpose: 'judge-video', ledger});
   const j = parseJson(r.text);
   return parseJudge(j, letters, r.text);
 }
